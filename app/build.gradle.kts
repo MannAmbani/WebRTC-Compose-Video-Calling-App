@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.gsm.service)
+
 }
 
 android {
@@ -68,4 +70,7 @@ dependencies {
 
     //compose navigation
     implementation(libs.androidx.navigation.compose)
+
+    //firebase firestore for signaling server
+    implementation(libs.firebase.firestore.ktx)
 }
