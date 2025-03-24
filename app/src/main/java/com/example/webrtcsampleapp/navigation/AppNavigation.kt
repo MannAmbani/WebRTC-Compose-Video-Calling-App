@@ -14,6 +14,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.webrtcsampleapp.screens.HomeScreen
 import com.example.webrtcsampleapp.screens.PermissionScreen
 import com.example.webrtcsampleapp.screens.VideoCallScreen
+import timber.log.Timber
 
 @Composable
 fun WebRTCAppNavigation(){
@@ -36,7 +37,10 @@ fun SetupNavigation() {
         startDestination = if (isCameraPermissionGranted) "Home" else "Permission"
     ){
         composable("Home"){
-            HomeScreen()
+            HomeScreen(navigateToVideoCallScreen = { roomID ->
+                navController.navigate("VideoCallScreen/$roomID")
+
+            })
         }
         composable("Permission"){
             PermissionScreen(navigateToHomeScreen = {
@@ -48,8 +52,13 @@ fun SetupNavigation() {
                 }
             })
         }
-        composable("VideoCallScreen"){
-            VideoCallScreen()
+        composable("VideoCallScreen/{roomID}"){ backStackEntry ->
+            val roomID = backStackEntry.arguments?.getString("roomID", "")
+            if (roomID.isNullOrEmpty()){
+                Timber.e("Room ID not Available")
+                return@composable
+            }
+            VideoCallScreen(roomID)
         }
 
 
