@@ -7,15 +7,23 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults.topAppBarColors
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -23,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
+import org.webrtc.Camera2Enumerator
+import org.webrtc.CameraVideoCapturer
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -33,9 +43,11 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnection.IceServer
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RendererCommon
 import org.webrtc.RtpReceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
 import timber.log.Timber
 import java.util.concurrent.Executors
@@ -66,6 +78,14 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
         }
     }
     var localSdp: SessionDescription? = remember { null }
+
+    //renderers
+    var localRenderer by remember {
+        mutableStateOf<SurfaceViewRenderer?>(null)
+    }
+    var remoteRenderer by remember {
+        mutableStateOf<SurfaceViewRenderer?>(null)
+    }
 
 
     // checking room status
@@ -293,6 +313,11 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
         }
     }
 
+    fun deleteFirestoreDoc(){
+        val signallingRef = firestore.collection("rooms").document(roomID)
+        signallingRef.delete()
+    }
+
     fun setupFirebaseListener() {
         Timber.d("setupFirebaseListener() ::")
         val signallingRef = firestore.collection("rooms").document(roomID)
@@ -374,7 +399,9 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
 
                 }
 
-                override fun onAddStream(p0: MediaStream?) {
+                override fun onAddStream(streams: MediaStream?) {
+                    Timber.d("onAddStream() ::")
+                    streams?.videoTracks?.firstOrNull()?.addSink(remoteRenderer)
 
                 }
 
@@ -400,12 +427,87 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
             })
     }
 
+    fun createCameraCapturer(): CameraVideoCapturer? {
+        val cameraEnumerator = Camera2Enumerator(context)
+        val deviceNames = cameraEnumerator.deviceNames
+        for (deviceName in deviceNames) {
+            if (cameraEnumerator.isFrontFacing(deviceName)) {
+                val videoCapture = cameraEnumerator.createCapturer(deviceName, null)
+                if (videoCapture != null) {
+                    return videoCapture
+                }
+            }
+        }
+        for (deviceName in deviceNames) {
+            if (!cameraEnumerator.isFrontFacing(deviceName)) {
+                val videoCapture = cameraEnumerator.createCapturer(deviceName, null)
+                if (videoCapture != null) {
+                    return videoCapture
+                }
+            }
+        }
+
+        return null
+
+    }
+
+    //only for local rendering purpose, nothing to do with signaling server
+    fun initializeLocalMediaStream() {
+        Timber.d("initializeLocalMediaStream() ::")
+        val videoSource = peerConnectionFactory?.createVideoSource(false)
+        videoSource ?: run {
+            Timber.e("videoSource is null")
+        }
+
+        val videoCapturer = createCameraCapturer()
+        videoCapturer?.let { vc ->
+            vc.initialize(
+                SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext),
+                context,
+                videoSource?.capturerObserver
+            )
+            vc.startCapture(1280, 720, 30)
+
+        }
+        val videoTrack = peerConnectionFactory?.createVideoTrack("1001", videoSource)
+        val mediaStream = peerConnectionFactory?.createLocalMediaStream("mediaStream")
+        mediaStream?.addTrack(videoTrack)
+        peerConnection?.addStream(mediaStream)
+        videoTrack?.addSink(localRenderer)
+
+    }
 
     fun createOffer() {
         Timber.d("createOffer() ::")
         peerConnection?.createOffer(
             sdpObserver, sdpMediaConstrains
         )
+    }
+
+    DisposableEffect(Unit) {
+       onDispose {
+           executor.execute {
+               localRenderer?.release()?.also {
+                   localRenderer = null
+               }
+               remoteRenderer?.release()?.also {
+                   remoteRenderer = null
+               }
+               peerConnection?.dispose().also {
+                   peerConnection = null
+               }
+               peerConnectionFactory?.dispose().also {
+                   peerConnectionFactory = null
+               }
+               eglBase.release()
+
+               PeerConnectionFactory.stopInternalTracingCapture()
+               PeerConnectionFactory.shutdownInternalTracer()
+               deleteFirestoreDoc()
+
+           }
+           executor.shutdown()
+       }
     }
 
     //calls first for one time
@@ -416,7 +518,9 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
             executor.execute {
                 initializeWebRTC()
                 createPeerConnection()
+                initializeLocalMediaStream()
                 setupFirebaseListener()
+
                 if (isOfferer) {
 
                     createOffer()
@@ -434,8 +538,14 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 titleContentColor = MaterialTheme.colorScheme.primary
             ), title = {
-                Text(text = "WebRTC Sample!", fontWeight = FontWeight.Bold)
-            })
+                Text(text = "Video Call", fontWeight = FontWeight.Bold)
+            },
+            navigationIcon = {
+                IconButton(onClick = onNavigateBack) {
+                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back Button")
+                }
+            }
+            )
     }) { innerPadding ->
         Column(
             modifier = Modifier
@@ -445,7 +555,9 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
             AndroidView(
                 factory = { context ->
                     SurfaceViewRenderer(context).apply {
-                        init(eglBase.eglBaseContext,null)
+                        init(eglBase.eglBaseContext, null)
+                        setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+                        localRenderer = this
                     }
 
                 },
@@ -457,7 +569,8 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
             AndroidView(
                 factory = { context ->
                     SurfaceViewRenderer(context).apply {
-                        init(eglBase.eglBaseContext,null)
+                        init(eglBase.eglBaseContext, null)
+                        remoteRenderer = this
                     }
 
                 },

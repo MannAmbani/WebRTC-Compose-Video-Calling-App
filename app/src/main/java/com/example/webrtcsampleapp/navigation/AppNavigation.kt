@@ -58,7 +58,9 @@ fun SetupNavigation() {
                 Timber.e("Room ID not Available")
                 return@composable
             }
-            VideoCallScreen(roomID)
+            VideoCallScreen(roomID, onNavigateBack = {
+                navController.popBackStack()
+            })
         }
 
 
