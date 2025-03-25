@@ -15,6 +15,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults.topAppBarColors
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -22,6 +23,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.firebase.firestore.FirebaseFirestore
+import org.webrtc.DataChannel
+import org.webrtc.DefaultVideoDecoderFactory
+import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.EglBase
+import org.webrtc.IceCandidate
+import org.webrtc.MediaStream
+import org.webrtc.PeerConnection
+import org.webrtc.PeerConnection.IceServer
+import org.webrtc.PeerConnectionFactory
+import org.webrtc.RtpReceiver
 import org.webrtc.SurfaceViewRenderer
 import timber.log.Timber
 
@@ -33,10 +44,16 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
     //Now room is present
     //-- we will check the capacity of the room
     //-- more then 2 -> left back to home.
-
-
+    //code for setting up signaling server and managing video call
     val firestore = remember { FirebaseFirestore.getInstance() }
     val context = LocalContext.current
+    val eglBase = remember { EglBase.create() }
+    var peerConnectionFactory: PeerConnectionFactory? = remember { null }
+    var peerConnector: PeerConnection? = remember { null }
+    val localCandidatesToShare = remember { arrayListOf<Map<String, Any?>>() }
+    var isOfferer = remember { false }
+
+
 
     fun checkRoomCapacity(onProceed: () -> Unit) {
         //getting rooms from room id
@@ -60,10 +77,15 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
                 } else {
                     //add another participant
                     roomDocRef.update("participantCount", participantCount + 1)
+                    onProceed.invoke()
+
                 }
             } else {
                 //create room.
                 roomDocRef.set(mapOf("participantCount" to 1))
+                //set offerer to true
+                isOfferer = true
+                onProceed.invoke()
             }
         }.addOnFailureListener {
             // Handle the error
@@ -77,10 +99,127 @@ fun VideoCallScreen(roomID: String, onNavigateBack: () -> Unit) {
         }
     }
 
+    //WebRTC setup
+    fun initializeWebRTC() {
+        Timber.d("initializeWebRTC() :: ")
+
+        PeerConnectionFactory.initialize(
+            PeerConnectionFactory.InitializationOptions
+                .builder(context)
+                .setEnableInternalTracer(true)//helps for debugging
+                .createInitializationOptions()
+        )
+
+        //video encoder
+        val videoEncoderFactory = DefaultVideoEncoderFactory(
+            eglBase.eglBaseContext, true, false
+        )
+
+        //video decoder
+        val videoDecoderFactory = DefaultVideoDecoderFactory(
+            eglBase.eglBaseContext
+        )
+//created peer connection factory
+        peerConnectionFactory = PeerConnectionFactory.builder()
+            .setVideoEncoderFactory(videoEncoderFactory)
+            .setVideoDecoderFactory(videoDecoderFactory)
+            .createPeerConnectionFactory()
+
+    }
+
+    fun createPeerConnection() {
+        Timber.d("createPeerConnection() :: ")
+
+        //using local stun servers for connection
+        val iceServers = IceServer.builder(
+            listOf(
+                "stun:stun1.l.google.com:19302",
+                "stun:stun2.l.google.com:19302"
+            )
+        )
+
+
+        //creating peer connection with stun server
+        val rtcConfig = PeerConnection.RTCConfiguration(listOf(iceServers.createIceServer()))
+
+        peerConnector = peerConnectionFactory?.createPeerConnection(
+            rtcConfig,
+            object : PeerConnection.Observer {
+                override fun onSignalingChange(p0: PeerConnection.SignalingState?) {
+
+                }
+
+                override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
+                    super.onConnectionChange(newState)
+                    Timber.d("CreatePeerConnection() :: onConnectionChange() :: $newState")
+
+                }
+
+                override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {
+
+                }
+
+                override fun onIceConnectionReceivingChange(p0: Boolean) {
+
+                }
+
+                override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {
+
+                }
+
+                override fun onIceCandidate(candidate: IceCandidate?) {
+                    //send ice candidate to other peer
+                    val key = if (isOfferer) "iceOffer" else "iceAnswer"
+
+                    candidate?.let {
+                        localCandidatesToShare.add(
+                            mapOf(
+                                "candidate" to it.sdp,
+                                "sdpMid" to it.sdpMid,
+                                "sdpMLineIndex" to it.sdpMLineIndex
+                            )
+                        )
+
+                        //send to server
+                    }
+                }
+
+                override fun onIceCandidatesRemoved(p0: Array<out IceCandidate?>?) {
+
+                }
+
+                override fun onAddStream(p0: MediaStream?) {
+
+                }
+
+                override fun onRemoveStream(p0: MediaStream?) {
+
+                }
+
+                override fun onDataChannel(p0: DataChannel?) {
+
+                }
+
+                override fun onRenegotiationNeeded() {
+
+                }
+
+                override fun onAddTrack(
+                    p0: RtpReceiver?,
+                    p1: Array<out MediaStream?>?
+                ) {
+
+                }
+
+            })
+    }
+
     //calls first for one time
     LaunchedEffect(Unit) {
         checkRoomCapacity(onProceed = {
             //all business logic will be here
+            initializeWebRTC()
+            createPeerConnection()
         })
     }
 
